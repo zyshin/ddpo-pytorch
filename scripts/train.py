@@ -228,6 +228,9 @@ def main(_):
     # prepare prompt and reward fn
     prompt_fn = getattr(ddpo_pytorch.prompts, config.prompt_fn)
     reward_fn = getattr(ddpo_pytorch.rewards, config.reward_fn)()
+    # -------------------------------------------------------------------------------
+    intrinsic_reward_fn = getattr(ddpo_pytorch.rewards, config.intrinsic_reward_fn)()
+    # -------------------------------------------------------------------------------
 
     # generate negative prompt embeddings
     neg_prompt_embed = pipeline.text_encoder(
@@ -248,6 +251,12 @@ def main(_):
             config.per_prompt_stat_tracking.buffer_size,
             config.per_prompt_stat_tracking.min_count,
         )
+        # 追踪内部奖励均值方差--------------------------------------------------------------------------------
+        intrinsic_stat_tracker = PerPromptStatTracker(
+            config.per_prompt_stat_tracking.buffer_size,
+            config.per_prompt_stat_tracking.min_count,
+        )
+        # --------------------------------------------------------------------------------
 
     # for some reason, autocast is necessary for non-lora training but for lora training it isn't necessary and it uses
     # more memory
@@ -352,8 +361,14 @@ def main(_):
             )  # (batch_size, num_steps)
 
             # compute rewards asynchronously
+            if accelerator.is_main_process and epoch == first_epoch and i == 0:
+                print('images.shape:', images.shape)  # mages.shape: torch.Size([bs, 3, 512, 512])
+                print('latents.shape:', latents.shape)  # latents.shape: torch.Size([bs, step+1, 4, 64, 64])
             rewards = executor.submit(reward_fn, images, prompts, prompt_metadata)
-            # yield to to make sure reward computation starts
+            # 计算内部奖励 ---------------------------------------------------------------------
+            intrinsic_rewards = executor.submit(intrinsic_reward_fn, images, prompts, prompt_metadata, latents)
+            # --------------------------------------------------------------------------------
+            # yield to make sure reward computation starts
             time.sleep(0)
 
             samples.append(
@@ -369,19 +384,28 @@ def main(_):
                     ],  # each entry is the latent after timestep t
                     "log_probs": log_probs,
                     "rewards": rewards,
+                    # --------------------------------------------------------------------------------
+                    "intrinsic_rewards": intrinsic_rewards,
+                    # --------------------------------------------------------------------------------
                 }
             )
 
         # wait for all rewards to be computed
-        for sample in tqdm(
+        for sample in tqdm(  # sample = 每一条轨迹
             samples,
             desc="Waiting for rewards",
             disable=not accelerator.is_local_main_process,
             position=0,
         ):
             rewards, reward_metadata = sample["rewards"].result()
+            # --------------------------------------------------------------------------------
+            intrinsic_rewards, intrinsic_reward_metadata = sample["intrinsic_rewards"].result()
+            # --------------------------------------------------------------------------------
             # accelerator.print(reward_metadata)
             sample["rewards"] = torch.as_tensor(rewards, device=accelerator.device)
+            # --------------------------------------------------------------------------------
+            sample["intrinsic_rewards"] = torch.as_tensor(intrinsic_rewards, device=accelerator.device)
+            # --------------------------------------------------------------------------------
 
         # collate samples into dict where each entry has shape (num_batches_per_epoch * sample.batch_size, ...)
         samples = {k: torch.cat([s[k] for s in samples]) for k in samples[0].keys()}
@@ -411,14 +435,23 @@ def main(_):
 
         # gather rewards across processes
         rewards = accelerator.gather(samples["rewards"]).cpu().numpy()
+        # --------------------------------------------------------------------------------
+        intrinsic_rewards = accelerator.gather(samples["intrinsic_rewards"]).cpu().numpy()
+        if accelerator.is_local_main_process and epoch == first_epoch:
+            print(f'rewards.shape:', rewards.shape)  # rewards.shape: torch.Size([ngpus * sample.batch_size * sample.num_batches_per_epoch])
+            print(f'intrinsic_rewards.shape:', intrinsic_rewards.shape)
+        # --------------------------------------------------------------------------------
 
         # log rewards and images
         accelerator.log(
             {
                 "reward": rewards,
+                "intrinsic_rewards": intrinsic_rewards,
                 "epoch": epoch,
                 "reward_mean": rewards.mean(),
                 "reward_std": rewards.std(),
+                "intrinsic_reward_mean": intrinsic_rewards.mean(axis=0),
+                "intrinsic_reward_std": intrinsic_rewards.std(axis=0),
             },
             step=global_step,
         )
@@ -431,8 +464,18 @@ def main(_):
                 prompt_ids, skip_special_tokens=True
             )
             advantages = stat_tracker.update(prompts, rewards)
+            # --------------------------------------------------------------------------------
+            intrinsic_advantages = intrinsic_stat_tracker.update(prompts, intrinsic_rewards)
+            # --------------------------------------------------------------------------------
         else:
             advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+            # --------------------------------------------------------------------------------
+            # [[1, 2, 3, 4],
+            #  [2, 3, 4, 5]]
+            # mean = [1.5, 2.5, 3.5, 4.5]
+            # std = [...]
+            intrinsic_advantages = (intrinsic_rewards - intrinsic_rewards.mean(axis=0)) / (intrinsic_rewards.std(axis=0) + 1e-8)
+            # --------------------------------------------------------------------------------
 
         # ungather advantages; we only need to keep the entries corresponding to the samples on this process
         samples["advantages"] = (
@@ -440,8 +483,14 @@ def main(_):
             .reshape(accelerator.num_processes, -1)[accelerator.process_index]
             .to(accelerator.device)
         )
+        samples["intrinsic_advantages"] = (
+            torch.as_tensor(intrinsic_advantages)
+            .reshape(accelerator.num_processes, -1, intrinsic_advantages.shape[-1])[accelerator.process_index]
+            .to(accelerator.device)
+        )
 
         del samples["rewards"]
+        del samples["intrinsic_rewards"]
         del samples["prompt_ids"]
 
         total_batch_size, num_timesteps = samples["timesteps"].shape
@@ -535,9 +584,15 @@ def main(_):
                                 prev_sample=sample["next_latents"][:, j],
                             )
 
+                        # if accelerator.is_main_process:
+                        #     import pdb; pdb.set_trace()
+                        # 加内部奖励 ----------------------------------------------------------------------
                         # ppo logic
+                        advantages = sample["advantages"] + sample["intrinsic_advantages"][:, j]
+                        # advantages = sample["advantages"] + sample["intrinsic_advantages"][:, :j].sum(axis=-1)
+                        # ----------------------------------------------------------------------
                         advantages = torch.clamp(
-                            sample["advantages"],
+                            advantages,
                             -config.train.adv_clip_max,
                             config.train.adv_clip_max,
                         )

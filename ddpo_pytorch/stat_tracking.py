@@ -20,11 +20,11 @@ class PerPromptStatTracker:
             self.stats[prompt].extend(prompt_rewards)
 
             if len(self.stats[prompt]) < self.min_count:
-                mean = np.mean(rewards)
-                std = np.std(rewards) + 1e-6
+                mean = np.mean(rewards, axis=0)
+                std = np.std(rewards, axis=0) + 1e-6
             else:
-                mean = np.mean(self.stats[prompt])
-                std = np.std(self.stats[prompt]) + 1e-6
+                mean = np.mean(self.stats[prompt], axis=0)
+                std = np.std(self.stats[prompt], axis=0) + 1e-6
             advantages[prompts == prompt] = (prompt_rewards - mean) / std
 
         return advantages

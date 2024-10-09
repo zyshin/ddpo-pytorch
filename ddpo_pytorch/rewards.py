@@ -46,6 +46,16 @@ def aesthetic_score():
     return _fn
 
 
+# 简化版内部奖励，与x0作差 ----------------------------------------------------------
+def intrinsic_1():
+    def _fn(images, prompts, metadata, latents):
+        intrinsic_rewards = torch.square(latents[:, :-1] - latents[:, -1:]).mean(dim=(-3, -2, -1))
+        return intrinsic_rewards, {}
+
+    return _fn
+# -------------------------------------------------------------------------------
+
+
 def llava_strict_satisfaction():
     """Submits images to LLaVA and computes a reward by matching the responses to ground truth answers directly without
     using BERTScore. Prompt metadata must have "questions" and "answers" keys. See
