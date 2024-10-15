@@ -46,10 +46,24 @@ def aesthetic_score():
     return _fn
 
 
+dummy_aesthetic_score = aesthetic_score
+extrinsic_aesthetic_score = aesthetic_score
+
+
 # 简化版内部奖励，与x0作差 ----------------------------------------------------------
 def intrinsic_1():
     def _fn(images, prompts, metadata, latents):
         intrinsic_rewards = torch.square(latents[:, :-1] - latents[:, -1:]).mean(dim=(-3, -2, -1))
+        return intrinsic_rewards, {}
+
+    return _fn
+# -------------------------------------------------------------------------------
+
+
+# 简化版内部奖励，与xT作差 ----------------------------------------------------------
+def intrinsic_2():
+    def _fn(images, prompts, metadata, latents):
+        intrinsic_rewards = torch.square(latents[:, 1:] - latents[:, 0:1]).mean(dim=(-3, -2, -1))
         return intrinsic_rewards, {}
 
     return _fn

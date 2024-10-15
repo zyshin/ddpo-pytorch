@@ -79,7 +79,7 @@ def main(_):
     )
     if accelerator.is_main_process:
         accelerator.init_trackers(
-            project_name="ddpo-pytorch",
+            project_name=f"ddpo-pytorch-{config.project_name}" if config.project_name else "ddpo-pytorch",
             config=config.to_dict(),
             init_kwargs={"wandb": {"name": config.run_name}},
         )
@@ -411,35 +411,38 @@ def main(_):
         samples = {k: torch.cat([s[k] for s in samples]) for k in samples[0].keys()}
 
         # this is a hack to force wandb to log the images as JPEGs instead of PNGs
-        with tempfile.TemporaryDirectory() as tmpdir:
-            for i, image in enumerate(images):
-                pil = Image.fromarray(
-                    (image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+        if accelerator.is_local_main_process:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                for i, image in enumerate(images):
+                    pil = Image.fromarray(
+                        (image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+                    )
+                    pil = pil.resize((256, 256))
+                    pil.save(os.path.join(tmpdir, f"{i}.jpg"))
+                accelerator.log(
+                    {
+                        "images": [
+                            wandb.Image(
+                                os.path.join(tmpdir, f"{i}.jpg"),
+                                caption=f"{prompt:.25} | {reward:.2f}",
+                            )
+                            for i, (prompt, reward) in enumerate(
+                                zip(prompts, rewards)
+                            )  # only log rewards from process 0
+                        ],
+                    },
+                    step=global_step,
                 )
-                pil = pil.resize((256, 256))
-                pil.save(os.path.join(tmpdir, f"{i}.jpg"))
-            accelerator.log(
-                {
-                    "images": [
-                        wandb.Image(
-                            os.path.join(tmpdir, f"{i}.jpg"),
-                            caption=f"{prompt:.25} | {reward:.2f}",
-                        )
-                        for i, (prompt, reward) in enumerate(
-                            zip(prompts, rewards)
-                        )  # only log rewards from process 0
-                    ],
-                },
-                step=global_step,
-            )
 
         # gather rewards across processes
         rewards = accelerator.gather(samples["rewards"]).cpu().numpy()
         # --------------------------------------------------------------------------------
         intrinsic_rewards = accelerator.gather(samples["intrinsic_rewards"]).cpu().numpy()
         if accelerator.is_local_main_process and epoch == first_epoch:
-            print(f'rewards.shape:', rewards.shape)  # rewards.shape: torch.Size([ngpus * sample.batch_size * sample.num_batches_per_epoch])
-            print(f'intrinsic_rewards.shape:', intrinsic_rewards.shape)
+            print('rewards.shape:', rewards.shape)  # rewards.shape: torch.Size([ngpus * sample.batch_size * sample.num_batches_per_epoch])
+            print('intrinsic_rewards.shape:', intrinsic_rewards.shape)
+            print('intrinsic_rewards:', intrinsic_rewards)
+            print('intrinsic_rewards.mean:', intrinsic_rewards.mean(axis=0))
         # --------------------------------------------------------------------------------
 
         # log rewards and images
@@ -588,7 +591,22 @@ def main(_):
                         #     import pdb; pdb.set_trace()
                         # 加内部奖励 ----------------------------------------------------------------------
                         # ppo logic
-                        advantages = sample["advantages"] + sample["intrinsic_advantages"][:, j]
+                        # advantages = sample["advantages"]
+                        # if 5 <= j < (num_train_timesteps - 5):
+                        #     advantages += 0.01 * sample["intrinsic_advantages"][:, j]
+                        if config.reward_fn.startswith("dummy"):
+                            advantages = config.intrinsic_reward_weight * sample["intrinsic_advantages"][:, j]
+                        elif config.reward_fn.startswith("extrinsic"):
+                            if j == num_train_timesteps - 1:  # 仅最后一步加外部奖励
+                                advantages = sample["advantages"]
+                            else:
+                                advantages = config.intrinsic_reward_weight * sample["intrinsic_advantages"][:, j]
+                        else:
+                            if j >= num_train_timesteps - 5:
+                                advantages = sample["advantages"]
+                            else:
+                                advantages = sample["advantages"] + config.intrinsic_reward_weight * sample["intrinsic_advantages"][:, j]
+
                         # advantages = sample["advantages"] + sample["intrinsic_advantages"][:, :j].sum(axis=-1)
                         # ----------------------------------------------------------------------
                         advantages = torch.clamp(

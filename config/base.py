@@ -6,6 +6,7 @@ def get_config():
 
     ###### General ######
     # run name for wandb logging and checkpoint saving -- if not provided, will be auto-generated based on the datetime.
+    config.project_name = ""
     config.run_name = ""
     # random seed for reproducibility.
     config.seed = 42
@@ -98,6 +99,8 @@ def get_config():
     ###### Reward Function ######
     # reward function to use. see `rewards.py` for available reward functions.
     config.reward_fn = "jpeg_compressibility"
+    config.intrinsic_reward_fn = ""
+    config.intrinsic_reward_weight = 0.025
 
     ###### Per-Prompt Stat Tracking ######
     # when enabled, the model will track the mean and std of reward on a per-prompt basis and use that to compute

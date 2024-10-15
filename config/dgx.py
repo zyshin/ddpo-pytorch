@@ -7,6 +7,7 @@ base = imp.load_source("base", os.path.join(os.path.dirname(__file__), "base.py"
 
 def compressibility():
     config = base.get_config()
+    config.project_name = "compressibility"
 
     config.pretrained.model = "CompVis/stable-diffusion-v1-4"
 
@@ -29,6 +30,8 @@ def compressibility():
 
     # rewards
     config.reward_fn = "jpeg_compressibility"
+    config.intrinsic_reward_fn = "intrinsic_2"
+    config.intrinsic_reward_weight = 0.01
 
     config.per_prompt_stat_tracking = {
         "buffer_size": 16,
@@ -40,15 +43,20 @@ def compressibility():
 
 def incompressibility():
     config = compressibility()
+    config.project_name = "incompressibility"
     config.reward_fn = "jpeg_incompressibility"
+    config.intrinsic_reward_fn = "intrinsic_2"
+    config.intrinsic_reward_weight = 0.01
     return config
 
 
 def aesthetic():
     config = compressibility()
+    config.project_name = ""
     config.num_epochs = 200
     config.reward_fn = "aesthetic_score"
     config.intrinsic_reward_fn = "intrinsic_1"
+    config.intrinsic_reward_weight = 0.025
 
     # this reward is a bit harder to optimize, so I used 2 gradient updates per epoch.
     config.train.gradient_accumulation_steps = 4
@@ -58,6 +66,29 @@ def aesthetic():
         "buffer_size": 32,
         "min_count": 16,
     }
+    return config
+
+
+def aesthetic2():
+    config = aesthetic()
+    config.intrinsic_reward_fn = "intrinsic_2"
+    config.intrinsic_reward_weight = 0.01
+    return config
+
+
+def intrinsic_only():
+    config = aesthetic()
+    config.reward_fn = "dummy_aesthetic_score"
+    config.intrinsic_reward_fn = "intrinsic_2"
+    config.intrinsic_reward_weight = 0.025
+    return config
+
+
+def new_baseline_aesthetic():  # 只给最后一步加外部奖励、其他步加内部奖励效果不好
+    config = aesthetic()
+    config.reward_fn = "extrinsic_aesthetic_score"
+    config.intrinsic_reward_fn = "intrinsic_2"
+    config.intrinsic_reward_weight = 0.01
     return config
 
 
