@@ -70,6 +70,17 @@ def intrinsic_2():
 # -------------------------------------------------------------------------------
 
 
+# 内部奖励与xT作差，乘上判别器权重 ---------------------------------------------------
+def intrinsic_ada():
+    def _fn(images, prompts, metadata, latents, disnet):
+        disoutput = disnet(latents.detach()[:, 1:].reshape(-1, *latents.shape[2:])).reshape(latents.shape[0], -1)
+        intrinsic_rewards = torch.square(latents[:, 1:] - latents[:, 0:1]).mean(dim=(-3, -2, -1))
+        return (1 - disoutput) * intrinsic_rewards, {}
+
+    return _fn
+# -------------------------------------------------------------------------------
+
+
 def llava_strict_satisfaction():
     """Submits images to LLaVA and computes a reward by matching the responses to ground truth answers directly without
     using BERTScore. Prompt metadata must have "questions" and "answers" keys. See

@@ -15,6 +15,7 @@ from diffusers.models.attention_processor import LoRAAttnProcessor
 import numpy as np
 import ddpo_pytorch.prompts
 import ddpo_pytorch.rewards
+from ddpo_pytorch.adaptive_model import Discriminator
 from ddpo_pytorch.stat_tracking import PerPromptStatTracker
 from ddpo_pytorch.diffusers_patch.pipeline_with_logprob import pipeline_with_logprob
 from ddpo_pytorch.diffusers_patch.ddim_with_logprob import ddim_step_with_logprob
@@ -24,6 +25,7 @@ from functools import partial
 import tqdm
 import tempfile
 from PIL import Image
+from torch import inf
 
 tqdm = partial(tqdm.tqdm, dynamic_ncols=True)
 
@@ -32,6 +34,38 @@ FLAGS = flags.FLAGS
 config_flags.DEFINE_config_file("config", "config/base.py", "Training configuration.")
 
 logger = get_logger(__name__)
+
+
+def global_grad_norm_(parameters, norm_type=2):
+    r"""Clips gradient norm of an iterable of parameters.
+
+    The norm is computed over all gradients together, as if they were
+    concatenated into a single vector. Gradients are modified in-place.
+
+    Arguments:
+        parameters (Iterable[Tensor] or Tensor): an iterable of Tensors or a
+            single Tensor that will have gradients normalized
+        max_norm (float or int): max norm of the gradients
+        norm_type (float or int): type of the used p-norm. Can be ``'inf'`` for
+            infinity norm.
+
+    Returns:
+        Total norm of the parameters (viewed as a single vector).
+    """
+    if isinstance(parameters, torch.Tensor):
+        parameters = [parameters]
+    parameters = list(filter(lambda p: p.grad is not None, parameters))
+    norm_type = float(norm_type)
+    if norm_type == inf:
+        total_norm = max(p.grad.data.abs().max() for p in parameters)
+    else:
+        total_norm = 0
+        for p in parameters:
+            param_norm = p.grad.data.norm(norm_type)
+            total_norm += param_norm.item() ** norm_type
+        total_norm = total_norm ** (1. / norm_type)
+
+    return total_norm
 
 
 def main(_):
@@ -123,6 +157,11 @@ def main(_):
     if config.use_lora:
         pipeline.unet.to(accelerator.device, dtype=inference_dtype)
 
+    disnet = Discriminator(64)
+    pipeline.disnet = disnet
+    pipeline.disnet.to(accelerator.device)
+    pipeline.disnet.train()
+
     if config.use_lora:
         # Set correct lora layers
         lora_attn_procs = {}
@@ -162,7 +201,7 @@ def main(_):
     # set up diffusers-friendly checkpoint saving with Accelerate
 
     def save_model_hook(models, weights, output_dir):
-        assert len(models) == 1
+        assert len(models) >= 1
         if config.use_lora and isinstance(models[0], AttnProcsLayers):
             pipeline.unet.save_attn_procs(output_dir)
         elif not config.use_lora and isinstance(models[0], UNet2DConditionModel):
@@ -264,7 +303,7 @@ def main(_):
     # autocast = accelerator.autocast
 
     # Prepare everything with our `accelerator`.
-    unet, optimizer = accelerator.prepare(unet, optimizer)
+    unet, disnet, optimizer = accelerator.prepare(unet, disnet, optimizer)
 
     # executor to perform callbacks asynchronously. this is beneficial for the llava callbacks which makes a request to a
     # remote server running llava inference.
@@ -366,7 +405,7 @@ def main(_):
                 print('latents.shape:', latents.shape)  # latents.shape: torch.Size([bs, step+1, 4, 64, 64])
             rewards = executor.submit(reward_fn, images, prompts, prompt_metadata)
             # 计算内部奖励 ---------------------------------------------------------------------
-            intrinsic_rewards = executor.submit(intrinsic_reward_fn, images, prompts, prompt_metadata, latents)
+            intrinsic_rewards = executor.submit(intrinsic_reward_fn, images, prompts, prompt_metadata, latents.detach(), disnet)
             # --------------------------------------------------------------------------------
             # yield to make sure reward computation starts
             time.sleep(0)
@@ -648,6 +687,18 @@ def main(_):
                             )
                         optimizer.step()
                         optimizer.zero_grad()
+
+                        for _ in range(1):
+                            forward_loss_disnet, outputs_f, outputs_t = accelerator.unwrap_model(disnet).loss(sample["latents"].detach())
+                            forward_loss1 = forward_loss_disnet
+                            # forward_loss1 = (forward_loss1 * mask).sum() / torch.max(mask.sum(), torch.Tensor([1]).to(self.device))
+                            loss1 = forward_loss1
+                            loss1.backward()
+                            # global_grad_norm_(list(self.unet.parameters()))
+                            optimizer.step()
+                            optimizer.zero_grad()
+                        info["disnet_f"].append(outputs_f)
+                        info["disnet_t"].append(outputs_t)
 
                     # Checks if the accelerator has performed an optimization step behind the scenes
                     if accelerator.sync_gradients:

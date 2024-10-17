@@ -41,11 +41,25 @@ def compressibility():
     return config
 
 
+def compressibility_ada():
+    config = compressibility()
+    config.intrinsic_reward_fn = "intrinsic_ada"
+    config.intrinsic_reward_weight = 0.01
+    return config
+
+
 def incompressibility():
     config = compressibility()
     config.project_name = "incompressibility"
     config.reward_fn = "jpeg_incompressibility"
     config.intrinsic_reward_fn = "intrinsic_2"
+    config.intrinsic_reward_weight = 0.01
+    return config
+
+
+def incompressibility_ada():
+    config = incompressibility()
+    config.intrinsic_reward_fn = "intrinsic_ada"
     config.intrinsic_reward_weight = 0.01
     return config
 
@@ -88,6 +102,13 @@ def new_baseline_aesthetic():  # 只给最后一步加外部奖励、其他步�
     config = aesthetic()
     config.reward_fn = "extrinsic_aesthetic_score"
     config.intrinsic_reward_fn = "intrinsic_2"
+    config.intrinsic_reward_weight = 0.01
+    return config
+
+
+def aesthetic_ada():
+    config = aesthetic2()
+    config.intrinsic_reward_fn = "intrinsic_ada"
     config.intrinsic_reward_weight = 0.01
     return config
 
