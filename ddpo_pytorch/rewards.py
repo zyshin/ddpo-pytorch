@@ -4,6 +4,13 @@ import numpy as np
 import torch
 
 
+def baseline():  # empty intrinsic rewards
+    def _fn(images, prompts, metadata, latents):
+        return np.zeros((latents.shape[0], latents.shape[1] - 1)), {}
+
+    return _fn
+
+
 def jpeg_incompressibility():
     def _fn(images, prompts, metadata):
         if isinstance(images, torch.Tensor):
@@ -51,7 +58,7 @@ extrinsic_aesthetic_score = aesthetic_score
 
 
 # 简化版内部奖励，与x0作差 ----------------------------------------------------------
-def intrinsic_1():
+def intrinsic_0():
     def _fn(images, prompts, metadata, latents):
         intrinsic_rewards = torch.square(latents[:, :-1] - latents[:, -1:]).mean(dim=(-3, -2, -1))
         return intrinsic_rewards, {}
@@ -61,7 +68,7 @@ def intrinsic_1():
 
 
 # 简化版内部奖励，与xT作差 ----------------------------------------------------------
-def intrinsic_2():
+def intrinsic():
     def _fn(images, prompts, metadata, latents):
         intrinsic_rewards = torch.square(latents[:, 1:] - latents[:, 0:1]).mean(dim=(-3, -2, -1))
         return intrinsic_rewards, {}
@@ -73,7 +80,7 @@ def intrinsic_2():
 # 内部奖励与xT作差，乘上判别器权重 ---------------------------------------------------
 def intrinsic_ada():
     def _fn(images, prompts, metadata, latents, disnet):
-        disoutput = disnet(latents.detach()[:, 1:].reshape(-1, *latents.shape[2:])).reshape(latents.shape[0], -1)
+        disoutput = disnet(latents[:, 1:].reshape(-1, *latents.shape[2:])).reshape(latents.shape[0], -1)
         intrinsic_rewards = torch.square(latents[:, 1:] - latents[:, 0:1]).mean(dim=(-3, -2, -1))
         return (1 - disoutput) * intrinsic_rewards, {}
 

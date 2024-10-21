@@ -72,7 +72,8 @@ def main(_):
     # basic Accelerate and logging setup
     config = FLAGS.config
 
-    unique_id = datetime.datetime.now().strftime("%Y.%m.%d_%H.%M.%S")
+    # unique_id = datetime.datetime.now().strftime("%Y.%m.%d_%H.%M.%S")
+    unique_id = f"{config.intrinsic_reward_fn} {config.intrinsic_reward_weight} {config.seed} " + datetime.datetime.now().strftime("%m%d_%H:%M")
     if not config.run_name:
         config.run_name = unique_id
     else:
@@ -157,10 +158,13 @@ def main(_):
     if config.use_lora:
         pipeline.unet.to(accelerator.device, dtype=inference_dtype)
 
-    disnet = Discriminator(64)
-    pipeline.disnet = disnet
-    pipeline.disnet.to(accelerator.device)
-    pipeline.disnet.train()
+    if config.intrinsic_reward_fn.endswith('ada'):
+        disnet = Discriminator(64)
+        pipeline.disnet = disnet
+        pipeline.disnet.to(accelerator.device)
+        pipeline.disnet.train()
+    else:
+        disnet = None
 
     if config.use_lora:
         # Set correct lora layers
@@ -303,7 +307,10 @@ def main(_):
     # autocast = accelerator.autocast
 
     # Prepare everything with our `accelerator`.
-    unet, disnet, optimizer = accelerator.prepare(unet, disnet, optimizer)
+    if disnet:
+        unet, disnet, optimizer = accelerator.prepare(unet, disnet, optimizer)
+    else:
+        unet, optimizer = accelerator.prepare(unet, optimizer)
 
     # executor to perform callbacks asynchronously. this is beneficial for the llava callbacks which makes a request to a
     # remote server running llava inference.
@@ -405,7 +412,10 @@ def main(_):
                 print('latents.shape:', latents.shape)  # latents.shape: torch.Size([bs, step+1, 4, 64, 64])
             rewards = executor.submit(reward_fn, images, prompts, prompt_metadata)
             # 计算内部奖励 ---------------------------------------------------------------------
-            intrinsic_rewards = executor.submit(intrinsic_reward_fn, images, prompts, prompt_metadata, latents.detach(), disnet)
+            if disnet:
+                intrinsic_rewards = executor.submit(intrinsic_reward_fn, images, prompts, prompt_metadata, latents.detach(), disnet)
+            else:
+                intrinsic_rewards = executor.submit(intrinsic_reward_fn, images, prompts, prompt_metadata, latents.detach())
             # --------------------------------------------------------------------------------
             # yield to make sure reward computation starts
             time.sleep(0)
@@ -688,17 +698,18 @@ def main(_):
                         optimizer.step()
                         optimizer.zero_grad()
 
-                        for _ in range(1):
-                            forward_loss_disnet, outputs_f, outputs_t = accelerator.unwrap_model(disnet).loss(sample["latents"].detach())
-                            forward_loss1 = forward_loss_disnet
-                            # forward_loss1 = (forward_loss1 * mask).sum() / torch.max(mask.sum(), torch.Tensor([1]).to(self.device))
-                            loss1 = forward_loss1
-                            loss1.backward()
-                            # global_grad_norm_(list(self.unet.parameters()))
-                            optimizer.step()
-                            optimizer.zero_grad()
-                        info["disnet_f"].append(outputs_f)
-                        info["disnet_t"].append(outputs_t)
+                        if disnet:
+                            for _ in range(1):
+                                forward_loss_disnet, outputs_f, outputs_t = accelerator.unwrap_model(disnet).loss(sample["latents"].detach())
+                                forward_loss1 = forward_loss_disnet
+                                # forward_loss1 = (forward_loss1 * mask).sum() / torch.max(mask.sum(), torch.Tensor([1]).to(self.device))
+                                loss1 = forward_loss1
+                                loss1.backward()
+                                # global_grad_norm_(list(self.unet.parameters()))
+                                optimizer.step()
+                                optimizer.zero_grad()
+                            info["disnet_f"].append(outputs_f)
+                            info["disnet_t"].append(outputs_t)
 
                     # Checks if the accelerator has performed an optimization step behind the scenes
                     if accelerator.sync_gradients:
